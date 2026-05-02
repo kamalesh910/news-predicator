@@ -1,0 +1,311 @@
+# =============================================================================
+# AI News Reader and Predictor — Docker Compose
+# =============================================================================
+# Starts all infrastructure (Zookeeper, Kafka, PostgreSQL, Redis) and
+# microservice stubs. Service definitions for the five application services
+# are added incrementally by later tasks; stubs are provided here so that
+# dependency ordering and network wiring are established from the start.
+#
+# Usage:
+#   docker-compose up --build          # start everything
+#   docker-compose down -v             # stop and remove volumes
+# =============================================================================
+
+networks:
+  monitoring:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Shared volume declarations
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+  zookeeper_data:
+  kafka_data:
+  redis_data:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Zookeeper — required by Kafka for cluster coordination
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "echo srvr | nc -w 2 localhost 2181 | grep -q Mode || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Kafka — central message bus
+  # Topics raw-news, analyzed-news, predictions are created by kafka-init.
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "29092:29092"   # host access for local development
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # kafka-init — one-shot container that creates the required topics
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/scripts/create-topics.sh"]
+    volumes:
+      - ./kafka-init/create-topics.sh:/scripts/create-topics.sh:ro
+    networks:
+      - monitoring
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — persistent storage for articles, bias records, predictions
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ainews}
+      POSTGRES_USER: ${POSTGRES_USER:-ainews_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro   # auto-runs 01_schema.sql
+    ports:
+      - "5432:5432"   # host access for local development / migrations
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ainews_user} -d ${POSTGRES_DB:-ainews}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Redis — session storage and caching for the API Gateway
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"   # host access for local development
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # ingestion-service — Node.js/TypeScript news and social media ingestion
+  # ---------------------------------------------------------------------------
+  ingestion-service:
+    build:
+      context: ./ingestion-service
+      dockerfile: Dockerfile
+    container_name: ingestion-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      KAFKA_BUFFER_LIMIT: ${KAFKA_BUFFER_LIMIT:-500}
+      KAFKA_LAG_THRESHOLD: ${KAFKA_LAG_THRESHOLD:-1000}
+      NEWS_API_URL: ${NEWS_API_URL:-http://localhost:4000/articles}
+      NEWS_API_KEY: ${NEWS_API_KEY:-}
+      NEWS_API_POLL_INTERVAL_MS: ${NEWS_API_POLL_INTERVAL_MS:-60000}
+      SOCIAL_STREAM_URL: ${SOCIAL_STREAM_URL:-ws://localhost:4001/stream}
+      SOCIAL_STREAM_AUTH_TOKEN: ${SOCIAL_STREAM_AUTH_TOKEN:-}
+      HEALTH_PORT: ${HEALTH_PORT:-3001}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${HEALTH_PORT:-3001}:3001"
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # analysis-service — Python/FastAPI BERT-based caste-bias analysis
+  # ---------------------------------------------------------------------------
+  analysis-service:
+    build:
+      context: ./analysis-service
+      dockerfile: Dockerfile
+    container_name: analysis-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-ainews}
+      POSTGRES_USER: ${POSTGRES_USER:-ainews_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      BERT_MODEL_PATH: ${BERT_MODEL_PATH:-mock}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "8000:8000"
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 300s   # extra time for BERT model download + load on first run
+
+  # ---------------------------------------------------------------------------
+  # prediction-service — Java/Flink burst detection and trend forecasting
+  # ---------------------------------------------------------------------------
+  prediction-service:
+    build:
+      context: ./prediction-service
+      dockerfile: Dockerfile
+    container_name: prediction-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-ainews}
+      POSTGRES_USER: ${POSTGRES_USER:-ainews_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      BURST_THRESHOLD: ${BURST_THRESHOLD:-5}
+      BURST_WINDOW_MS: ${BURST_WINDOW_MS:-30000}
+      HEALTH_PORT: ${HEALTH_PORT:-8080}
+    ports:
+      - "8080:8080"
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  # ---------------------------------------------------------------------------
+  # api-gateway — NestJS WebSocket gateway, REST endpoints, Kafka consumer
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-ainews}
+      POSTGRES_USER: ${POSTGRES_USER:-ainews_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      SESSION_TTL: ${SESSION_TTL:-3600}
+      API_GATEWAY_PORT: ${API_GATEWAY_PORT:-4000}
+    ports:
+      - "${API_GATEWAY_PORT:-4000}:4000"
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # dashboard-ui — Next.js 14 real-time monitoring dashboard
+  # ---------------------------------------------------------------------------
+  dashboard-ui:
+    build:
+      context: ./dashboard-ui
+      dockerfile: Dockerfile
+    container_name: dashboard-ui
+    restart: unless-stopped
+    depends_on:
+      - api-gateway
+    environment:
+      # Public env var exposed to the browser bundle (Next.js convention)
+      NEXT_PUBLIC_API_GATEWAY_URL: ${NEXT_PUBLIC_API_GATEWAY_URL:-http://localhost:4000}
+      # Server-side port configuration
+      DASHBOARD_PORT: ${DASHBOARD_PORT:-3000}
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
