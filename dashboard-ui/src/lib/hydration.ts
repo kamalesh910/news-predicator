@@ -102,8 +102,14 @@ const FETCH_TIMEOUT_MS = 5000;
  * @param signal - Optional AbortSignal for external cancellation.
  */
 export async function hydrateAll(signal?: AbortSignal): Promise<HydrationResult> {
+  // Use the same-origin /api proxy (configured in next.config.js rewrites).
+  // This avoids NEXT_PUBLIC_* bake-time issues in Docker — the browser always
+  // calls its own origin and Next.js proxies to the API Gateway server-side.
+  // Falls back to the direct URL for local dev without the proxy.
   const baseUrl =
-    process.env.NEXT_PUBLIC_API_GATEWAY_URL ?? 'http://localhost:4000';
+    typeof window !== 'undefined'
+      ? '/api'
+      : (process.env.API_GATEWAY_URL ?? 'http://localhost:4000');
 
   // Helper: fetch with a per-request 5-second timeout AbortController.
   // If the caller also passes an external signal, aborting it will abort the

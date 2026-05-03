@@ -172,7 +172,10 @@ LIMIT $1 OFFSET $2`,
               article_count,
               window_start,
               window_end,
-              detection_timestamp AS created_at
+              detection_timestamp AS created_at,
+              NULL::FLOAT       AS predicted_volume,
+              NULL::FLOAT       AS confidence_score,
+              NULL::TEXT        AS forecast_horizon
        FROM burst_events
        UNION ALL
        SELECT 'trend_forecast' AS type,
@@ -181,7 +184,10 @@ LIMIT $1 OFFSET $2`,
               NULL             AS article_count,
               NULL             AS window_start,
               NULL             AS window_end,
-              created_at
+              created_at,
+              predicted_volume,
+              confidence_score,
+              forecast_horizon::TEXT
        FROM trend_forecasts
        ORDER BY created_at DESC
        LIMIT $1 OFFSET $2`,
