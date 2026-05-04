@@ -11,6 +11,7 @@ export default function DashboardPage() {
     setArticles,
     setBurstEvents,
     setForecasts,
+    setTrendingTopics,
   } = useDashboardStore();
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -48,13 +49,14 @@ export default function DashboardPage() {
         setArticles(result.articles);
         setBurstEvents(result.burstEvents);
         setForecasts(result.forecasts);
+        setTrendingTopics(result.trendingTopics);
       } catch {
         // hydrateAll never throws, but catch just in case
       }
     })();
 
     return () => controller.abort();
-  }, [setArticles, setBurstEvents, setForecasts]);
+  }, [setArticles, setBurstEvents, setForecasts, setTrendingTopics]);
 
   return <DashboardView />;
 }

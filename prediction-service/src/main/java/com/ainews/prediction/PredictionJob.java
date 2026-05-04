@@ -170,11 +170,15 @@ public class PredictionJob {
 
         // ------------------------------------------------------------------
         // 8. Burst detection pipeline
-        //    KafkaSource → filter → keyBy topicName → window → BurstDetectionOperator
+        //    KafkaSource → filter → keyBy "topicName|platform" → window → BurstDetectionOperator
         //    → KafkaSink + PostgreSQL sink
         // ------------------------------------------------------------------
         SingleOutputStreamOperator<BurstEvent> burstStream = analyzedStream
-                .keyBy(AnalyzedNewsMessage::getSourceName)
+                .keyBy(msg -> {
+                    String topic    = msg.getTitle()      != null ? msg.getTitle()      : "unknown";
+                    String platform = msg.getSourceName() != null ? msg.getSourceName() : "Unknown";
+                    return topic + "|" + platform;
+                })
                 .window(TumblingProcessingTimeWindows.of(Time.seconds(windowSeconds)))
                 .process(new BurstDetectionOperator(burstThreshold, burstWindowMs))
                 .name("burst-detection");
@@ -192,12 +196,16 @@ public class PredictionJob {
 
         // ------------------------------------------------------------------
         // 9. Trend forecast pipeline
-        //    KafkaSource → filter → keyBy topicName → window → TrendForecastOperator
+        //    KafkaSource → filter → keyBy "topicName|platform" → window → TrendForecastOperator
         //    → KafkaSink + PostgreSQL sink
         // ------------------------------------------------------------------
         // Baseline volume: same as burst threshold (reasonable default)
         SingleOutputStreamOperator<TrendForecast> forecastStream = analyzedStream
-                .keyBy(AnalyzedNewsMessage::getSourceName)
+                .keyBy(msg -> {
+                    String topic    = msg.getTitle()      != null ? msg.getTitle()      : "unknown";
+                    String platform = msg.getSourceName() != null ? msg.getSourceName() : "Unknown";
+                    return topic + "|" + platform;
+                })
                 .window(TumblingProcessingTimeWindows.of(Time.seconds(windowSeconds)))
                 .process(new TrendForecastOperator(burstThreshold))
                 .name("trend-forecast");

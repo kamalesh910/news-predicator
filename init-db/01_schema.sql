@@ -80,7 +80,10 @@ CREATE INDEX IF NOT EXISTS idx_bias_records_analysis_timestamp
 CREATE TABLE IF NOT EXISTS burst_events (
     event_id              UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
     topic_name            TEXT          NOT NULL,
+    platform              TEXT          NOT NULL DEFAULT 'Unknown',
     article_count         INT           NOT NULL CHECK (article_count > 0),
+    avg_bias_score        FLOAT         CHECK (avg_bias_score IS NULL OR (avg_bias_score >= 0.0 AND avg_bias_score <= 1.0)),
+    trend_direction       CHAR(1)       NOT NULL DEFAULT '→' CHECK (trend_direction IN ('↑', '↓', '→')),
     window_start          TIMESTAMPTZ   NOT NULL,
     window_end            TIMESTAMPTZ   NOT NULL,
     detection_timestamp   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
@@ -104,8 +107,11 @@ CREATE INDEX IF NOT EXISTS idx_burst_events_detection_timestamp
 CREATE TABLE IF NOT EXISTS trend_forecasts (
     forecast_id        UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
     topic_name         TEXT          NOT NULL,
+    platform           TEXT          NOT NULL DEFAULT 'Unknown',
     predicted_volume   FLOAT         NOT NULL CHECK (predicted_volume >= 0.0),
     confidence_score   FLOAT         NOT NULL CHECK (confidence_score >= 0.0 AND confidence_score <= 1.0),
+    avg_bias_score     FLOAT         CHECK (avg_bias_score IS NULL OR (avg_bias_score >= 0.0 AND avg_bias_score <= 1.0)),
+    trend_direction    CHAR(1)       NOT NULL DEFAULT '→' CHECK (trend_direction IN ('↑', '↓', '→')),
     forecast_horizon   TIMESTAMPTZ   NOT NULL,
     created_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
@@ -147,3 +153,128 @@ CREATE INDEX IF NOT EXISTS idx_ws_event_log_event_type
 -- GIN index for JSONB payload queries (e.g. filtering by topic inside payload)
 CREATE INDEX IF NOT EXISTS idx_ws_event_log_payload
     ON ws_event_log USING GIN (payload);
+
+-- ---------------------------------------------------------------------------
+-- trending_topics (view)
+-- ---------------------------------------------------------------------------
+-- Aggregates the most recent burst_event per topic+platform pair so the
+-- API Gateway can serve a single /trending-topics endpoint without a
+-- separate table. Falls back to trend_forecasts when no burst event exists.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW trending_topics AS
+SELECT
+    topic_name,
+    platform,
+    article_count                                          AS volume,
+    avg_bias_score,
+    trend_direction,
+    CASE
+        WHEN avg_bias_score IS NULL   THEN 'stable'
+        WHEN avg_bias_score > 0.6     THEN 'critical'
+        WHEN avg_bias_score > 0.3     THEN 'elevated'
+        ELSE                               'stable'
+    END                                                    AS risk_level,
+    detection_timestamp                                    AS updated_at
+FROM (
+    SELECT
+        topic_name,
+        platform,
+        article_count,
+        avg_bias_score,
+        trend_direction,
+        detection_timestamp,
+        ROW_NUMBER() OVER (
+            PARTITION BY topic_name, platform
+            ORDER BY detection_timestamp DESC
+        ) AS rn
+    FROM burst_events
+) ranked
+WHERE rn = 1
+
+UNION ALL
+
+-- Include topics that have forecasts but no burst event yet
+SELECT
+    tf.topic_name,
+    tf.platform,
+    CAST(tf.predicted_volume AS INT)                       AS volume,
+    tf.avg_bias_score,
+    tf.trend_direction,
+    CASE
+        WHEN tf.avg_bias_score IS NULL THEN 'stable'
+        WHEN tf.avg_bias_score > 0.6   THEN 'critical'
+        WHEN tf.avg_bias_score > 0.3   THEN 'elevated'
+        ELSE                                'stable'
+    END                                                    AS risk_level,
+    tf.created_at                                          AS updated_at
+FROM (
+    SELECT
+        topic_name,
+        platform,
+        predicted_volume,
+        avg_bias_score,
+        trend_direction,
+        created_at,
+        ROW_NUMBER() OVER (
+            PARTITION BY topic_name, platform
+            ORDER BY created_at DESC
+        ) AS rn
+    FROM trend_forecasts
+) tf_ranked
+WHERE tf_ranked.rn = 1
+  AND NOT EXISTS (
+      SELECT 1 FROM burst_events be
+      WHERE be.topic_name = tf_ranked.topic_name
+        AND be.platform   = tf_ranked.platform
+  );
+
+-- ---------------------------------------------------------------------------
+-- Migration guards: add new columns to existing tables if they don't exist.
+-- Safe to run on a DB that was created before this schema version.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'burst_events' AND column_name = 'platform'
+    ) THEN
+        ALTER TABLE burst_events ADD COLUMN platform TEXT NOT NULL DEFAULT 'Unknown';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'burst_events' AND column_name = 'avg_bias_score'
+    ) THEN
+        ALTER TABLE burst_events ADD COLUMN avg_bias_score FLOAT
+            CHECK (avg_bias_score IS NULL OR (avg_bias_score >= 0.0 AND avg_bias_score <= 1.0));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'burst_events' AND column_name = 'trend_direction'
+    ) THEN
+        ALTER TABLE burst_events ADD COLUMN trend_direction CHAR(1) NOT NULL DEFAULT '→';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'trend_forecasts' AND column_name = 'platform'
+    ) THEN
+        ALTER TABLE trend_forecasts ADD COLUMN platform TEXT NOT NULL DEFAULT 'Unknown';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'trend_forecasts' AND column_name = 'avg_bias_score'
+    ) THEN
+        ALTER TABLE trend_forecasts ADD COLUMN avg_bias_score FLOAT
+            CHECK (avg_bias_score IS NULL OR (avg_bias_score >= 0.0 AND avg_bias_score <= 1.0));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'trend_forecasts' AND column_name = 'trend_direction'
+    ) THEN
+        ALTER TABLE trend_forecasts ADD COLUMN trend_direction CHAR(1) NOT NULL DEFAULT '→';
+    END IF;
+END $$;

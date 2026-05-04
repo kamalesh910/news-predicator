@@ -94,6 +94,28 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
                 parsed = { ...parsed, type: 'trend_forecast' };
               }
             }
+
+            // Also broadcast a normalised trending_topic event so the dashboard
+            // can update the TrendingTopicsTable in real time without polling.
+            if (parsed['topicName']) {
+              const trendingPayload: Record<string, unknown> = {
+                type: 'trending_topic',
+                topic_name: parsed['topicName'],
+                platform: parsed['platform'] ?? 'Unknown',
+                volume: parsed['articleCount'] ?? parsed['predictedVolume'] ?? 0,
+                avg_bias_score: parsed['avgBiasScore'] ?? null,
+                trend_direction: parsed['trendDirection'] ?? '→',
+                risk_level: (() => {
+                  const score = parsed['avgBiasScore'] as number | null;
+                  if (score == null) return 'stable';
+                  if (score > 0.6) return 'critical';
+                  if (score > 0.3) return 'elevated';
+                  return 'stable';
+                })(),
+                updated_at: parsed['detectionTimestamp'] ?? parsed['created_at'] ?? new Date().toISOString(),
+              };
+              this.websocketGateway.broadcastToAllClients(trendingPayload);
+            }
           }
 
           logger.info({

@@ -2,6 +2,9 @@ package com.ainews.prediction.operators;
 
 import com.ainews.prediction.model.AnalyzedNewsMessage;
 import com.ainews.prediction.model.BurstEvent;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.util.Collector;
@@ -10,92 +13,130 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Flink {@link ProcessWindowFunction} that detects burst events for a given topic.
+ * Flink {@link ProcessWindowFunction} that detects burst events for a given topic+platform key.
  *
- * <p>Operates on a keyed stream where the key is the topic name. For each window evaluation,
- * it counts the number of articles in the window. If the count exceeds the configured
- * {@code threshold}, a {@link BurstEvent} is emitted.
+ * <p>For each window evaluation, counts articles and computes:
+ * <ul>
+ *   <li>{@code platform} — the source name shared by all articles in the window</li>
+ *   <li>{@code avgBiasScore} — mean bias score across articles with a non-null score</li>
+ *   <li>{@code trendDirection} — "↑", "↓", or "→" compared to the previous window's count</li>
+ * </ul>
+ *
+ * <p>A {@link BurstEvent} is emitted only when the article count exceeds the configured
+ * {@code threshold}. The previous window count is stored in Flink keyed state so trend
+ * direction can be computed across consecutive windows.
  *
  * <p>Satisfies Requirements 5.1, 5.2, 5.3
  */
 public class BurstDetectionOperator
         extends ProcessWindowFunction<AnalyzedNewsMessage, BurstEvent, String, TimeWindow> {
 
+    private static final long serialVersionUID = 1L;
+
     /** Minimum number of articles within the window required to trigger a burst event. */
     private final int threshold;
 
-    /** Size of the sliding window in milliseconds (informational; Flink manages the window). */
+    /** Size of the window in milliseconds (informational). */
     private final long windowSizeMs;
 
-    /**
-     * Constructs a {@code BurstDetectionOperator} with the given threshold and window size.
-     *
-     * @param threshold    minimum article count to trigger a {@link BurstEvent}
-     * @param windowSizeMs sliding window size in milliseconds (used for documentation/logging)
-     */
+    /** Keyed state: article count from the previous window for this topic+platform key. */
+    private transient ValueState<Integer> previousCountState;
+
     public BurstDetectionOperator(int threshold, long windowSizeMs) {
         this.threshold = threshold;
         this.windowSizeMs = windowSizeMs;
     }
 
-    /**
-     * Evaluates a window for a given topic key. Emits a {@link BurstEvent} when the article
-     * count in the window exceeds the configured threshold.
-     *
-     * @param topicName the topic key for this window
-     * @param context   window context providing window metadata
-     * @param elements  all articles in the current window
-     * @param out       collector to emit {@link BurstEvent} records
-     */
     @Override
-    public void process(
-            String topicName,
-            Context context,
-            Iterable<AnalyzedNewsMessage> elements,
-            Collector<BurstEvent> out) {
-
-        int count = 0;
-        for (AnalyzedNewsMessage ignored : elements) {
-            count++;
-        }
-
-        if (count > threshold) {
-            TimeWindow window = context.window();
-
-            String windowStart = Instant.ofEpochMilli(window.getStart())
-                    .toString(); // ISO 8601 via Instant.toString()
-            String windowEnd = Instant.ofEpochMilli(window.getEnd())
-                    .toString();
-            String detectionTimestamp = Instant.now()
-                    .toString();
-
-            BurstEvent event = new BurstEvent(
-                    UUID.randomUUID().toString(),
-                    topicName,
-                    count,
-                    windowStart,
-                    windowEnd,
-                    detectionTimestamp
-            );
-
-            out.collect(event);
-        }
+    public void open(Configuration parameters) throws Exception {
+        ValueStateDescriptor<Integer> descriptor =
+                new ValueStateDescriptor<>("burst-prev-count", Integer.class);
+        previousCountState = getRuntimeContext().getState(descriptor);
     }
 
     /**
-     * Returns the configured burst threshold.
+     * Evaluates a window. Emits a {@link BurstEvent} when article count exceeds threshold.
      *
-     * @return minimum article count to trigger a burst event
+     * @param compositeKey "topicName|platform" composite key
+     * @param context      window context
+     * @param elements     all articles in the current window
+     * @param out          collector for {@link BurstEvent} records
      */
+    @Override
+    public void process(
+            String compositeKey,
+            Context context,
+            Iterable<AnalyzedNewsMessage> elements,
+            Collector<BurstEvent> out) throws Exception {
+
+        int count = 0;
+        double biasSum = 0.0;
+        int biasCount = 0;
+        String platform = "Unknown";
+
+        for (AnalyzedNewsMessage msg : elements) {
+            count++;
+            if (msg.getSourceName() != null && !msg.getSourceName().isBlank()) {
+                platform = msg.getSourceName();
+            }
+            if (msg.getBiasScore() != null) {
+                biasSum += msg.getBiasScore();
+                biasCount++;
+            }
+        }
+
+        if (count <= threshold) {
+            // Update state even when below threshold so trend direction is accurate next window
+            previousCountState.update(count);
+            return;
+        }
+
+        // Compute average bias score
+        Double avgBiasScore = biasCount > 0 ? biasSum / biasCount : null;
+
+        // Compute trend direction vs previous window
+        Integer prevCount = previousCountState.value();
+        String trendDirection;
+        if (prevCount == null) {
+            trendDirection = "→";
+        } else if (count > prevCount * 1.05) {
+            trendDirection = "↑";
+        } else if (count < prevCount * 0.95) {
+            trendDirection = "↓";
+        } else {
+            trendDirection = "→";
+        }
+        previousCountState.update(count);
+
+        // Extract topicName from composite key (format: "topicName|platform")
+        String topicName = compositeKey.contains("|")
+                ? compositeKey.substring(0, compositeKey.indexOf('|'))
+                : compositeKey;
+
+        TimeWindow window = context.window();
+        String windowStart = Instant.ofEpochMilli(window.getStart()).toString();
+        String windowEnd   = Instant.ofEpochMilli(window.getEnd()).toString();
+        String detectionTs = Instant.now().toString();
+
+        BurstEvent event = new BurstEvent(
+                UUID.randomUUID().toString(),
+                topicName,
+                platform,
+                count,
+                avgBiasScore,
+                trendDirection,
+                windowStart,
+                windowEnd,
+                detectionTs
+        );
+
+        out.collect(event);
+    }
+
     public int getThreshold() {
         return threshold;
     }
 
-    /**
-     * Returns the configured window size in milliseconds.
-     *
-     * @return window size in milliseconds
-     */
     public long getWindowSizeMs() {
         return windowSizeMs;
     }

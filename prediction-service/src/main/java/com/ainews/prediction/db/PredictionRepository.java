@@ -41,24 +41,27 @@ public class PredictionRepository {
 
     /**
      * INSERT for the {@code burst_events} table.
-     * Columns: event_id, topic_name, article_count, window_start, window_end,
-     *          detection_timestamp
+     * Columns: event_id, topic_name, platform, article_count, avg_bias_score,
+     *          trend_direction, window_start, window_end, detection_timestamp
      */
     private static final String INSERT_BURST_EVENT = """
             INSERT INTO burst_events
-                (event_id, topic_name, article_count, window_start, window_end, detection_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (event_id, topic_name, platform, article_count, avg_bias_score,
+                 trend_direction, window_start, window_end, detection_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (event_id) DO NOTHING
             """;
 
     /**
      * INSERT for the {@code trend_forecasts} table.
-     * Columns: forecast_id, topic_name, predicted_volume, confidence_score, forecast_horizon
+     * Columns: forecast_id, topic_name, platform, predicted_volume, confidence_score,
+     *          avg_bias_score, trend_direction, forecast_horizon
      */
     private static final String INSERT_TREND_FORECAST = """
             INSERT INTO trend_forecasts
-                (forecast_id, topic_name, predicted_volume, confidence_score, forecast_horizon)
-            VALUES (?, ?, ?, ?, ?)
+                (forecast_id, topic_name, platform, predicted_volume, confidence_score,
+                 avg_bias_score, trend_direction, forecast_horizon)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (forecast_id) DO NOTHING
             """;
 
@@ -124,10 +127,17 @@ public class PredictionRepository {
 
                 ps.setObject(1, parseUuid(event.getEventId()));
                 ps.setString(2, event.getTopicName());
-                ps.setInt(3, event.getArticleCount());
-                ps.setTimestamp(4, parseTimestamp(event.getWindowStart()));
-                ps.setTimestamp(5, parseTimestamp(event.getWindowEnd()));
-                ps.setTimestamp(6, parseTimestamp(event.getDetectionTimestamp()));
+                ps.setString(3, event.getPlatform() != null ? event.getPlatform() : "Unknown");
+                ps.setInt(4, event.getArticleCount());
+                if (event.getAvgBiasScore() != null) {
+                    ps.setDouble(5, event.getAvgBiasScore());
+                } else {
+                    ps.setNull(5, java.sql.Types.FLOAT);
+                }
+                ps.setString(6, event.getTrendDirection() != null ? event.getTrendDirection() : "→");
+                ps.setTimestamp(7, parseTimestamp(event.getWindowStart()));
+                ps.setTimestamp(8, parseTimestamp(event.getWindowEnd()));
+                ps.setTimestamp(9, parseTimestamp(event.getDetectionTimestamp()));
 
                 ps.executeUpdate();
 
@@ -185,9 +195,16 @@ public class PredictionRepository {
 
                 ps.setObject(1, parseUuid(forecast.getForecastId()));
                 ps.setString(2, forecast.getTopicName());
-                ps.setDouble(3, forecast.getPredictedVolume());
-                ps.setDouble(4, forecast.getConfidenceScore());
-                ps.setTimestamp(5, parseTimestamp(forecast.getForecastHorizon()));
+                ps.setString(3, forecast.getPlatform() != null ? forecast.getPlatform() : "Unknown");
+                ps.setDouble(4, forecast.getPredictedVolume());
+                ps.setDouble(5, forecast.getConfidenceScore());
+                if (forecast.getAvgBiasScore() != null) {
+                    ps.setDouble(6, forecast.getAvgBiasScore());
+                } else {
+                    ps.setNull(6, java.sql.Types.FLOAT);
+                }
+                ps.setString(7, forecast.getTrendDirection() != null ? forecast.getTrendDirection() : "→");
+                ps.setTimestamp(8, parseTimestamp(forecast.getForecastHorizon()));
 
                 ps.executeUpdate();
 

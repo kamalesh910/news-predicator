@@ -20,9 +20,24 @@ public class BurstEvent {
     @JsonProperty("topicName")
     private String topicName;
 
+    /** The platform (source name) from which the articles originated. */
+    @JsonProperty("platform")
+    private String platform;
+
     /** Number of articles observed within the detection window. */
     @JsonProperty("articleCount")
     private int articleCount;
+
+    /** Average bias score of articles in the window, in [0.0, 1.0]. Null if no scores available. */
+    @JsonProperty("avgBiasScore")
+    private Double avgBiasScore;
+
+    /**
+     * Trend direction compared to the previous window for this topic+platform.
+     * One of: "↑" (increasing), "↓" (decreasing), "→" (stable).
+     */
+    @JsonProperty("trendDirection")
+    private String trendDirection;
 
     /** ISO 8601 timestamp marking the start of the detection window. */
     @JsonProperty("windowStart")
@@ -45,7 +60,10 @@ public class BurstEvent {
      *
      * @param eventId            unique identifier for this burst event
      * @param topicName          topic for which the burst was detected
+     * @param platform           source platform (e.g. "NewsAPI", "Twitter")
      * @param articleCount       number of articles in the detection window
+     * @param avgBiasScore       average bias score of articles in the window, or null
+     * @param trendDirection     "↑", "↓", or "→" vs previous window
      * @param windowStart        ISO 8601 start of the detection window
      * @param windowEnd          ISO 8601 end of the detection window
      * @param detectionTimestamp ISO 8601 timestamp when the event was detected
@@ -53,13 +71,19 @@ public class BurstEvent {
     public BurstEvent(
             String eventId,
             String topicName,
+            String platform,
             int articleCount,
+            Double avgBiasScore,
+            String trendDirection,
             String windowStart,
             String windowEnd,
             String detectionTimestamp) {
         this.eventId = eventId;
         this.topicName = topicName;
+        this.platform = platform;
         this.articleCount = articleCount;
+        this.avgBiasScore = avgBiasScore;
+        this.trendDirection = trendDirection;
         this.windowStart = windowStart;
         this.windowEnd = windowEnd;
         this.detectionTimestamp = detectionTimestamp;
@@ -85,12 +109,36 @@ public class BurstEvent {
         this.topicName = topicName;
     }
 
+    public String getPlatform() {
+        return platform;
+    }
+
+    public void setPlatform(String platform) {
+        this.platform = platform;
+    }
+
     public int getArticleCount() {
         return articleCount;
     }
 
     public void setArticleCount(int articleCount) {
         this.articleCount = articleCount;
+    }
+
+    public Double getAvgBiasScore() {
+        return avgBiasScore;
+    }
+
+    public void setAvgBiasScore(Double avgBiasScore) {
+        this.avgBiasScore = avgBiasScore;
+    }
+
+    public String getTrendDirection() {
+        return trendDirection;
+    }
+
+    public void setTrendDirection(String trendDirection) {
+        this.trendDirection = trendDirection;
     }
 
     public String getWindowStart() {
@@ -122,7 +170,10 @@ public class BurstEvent {
         return "BurstEvent{"
                 + "eventId='" + eventId + '\''
                 + ", topicName='" + topicName + '\''
+                + ", platform='" + platform + '\''
                 + ", articleCount=" + articleCount
+                + ", avgBiasScore=" + avgBiasScore
+                + ", trendDirection='" + trendDirection + '\''
                 + ", windowStart='" + windowStart + '\''
                 + ", windowEnd='" + windowEnd + '\''
                 + ", detectionTimestamp='" + detectionTimestamp + '\''

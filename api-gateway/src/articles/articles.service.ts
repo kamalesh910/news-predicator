@@ -45,6 +45,17 @@ export interface Prediction {
   [key: string]: unknown;
 }
 
+/** Represents a row from the trending_topics view — aggregated per topic+platform. */
+export interface TrendingTopic {
+  topic_name: string;
+  platform: string;
+  volume: number;
+  avg_bias_score: number | null;
+  trend_direction: string;
+  risk_level: 'critical' | 'elevated' | 'stable';
+  updated_at: string;
+}
+
 /** Maximum number of records returned per page. */
 const MAX_PAGE_SIZE = 100;
 
@@ -169,7 +180,10 @@ LIMIT $1 OFFSET $2`,
       `SELECT 'burst_event'    AS type,
               event_id         AS id,
               topic_name,
+              platform,
               article_count,
+              avg_bias_score,
+              trend_direction,
               window_start,
               window_end,
               detection_timestamp AS created_at,
@@ -181,7 +195,10 @@ LIMIT $1 OFFSET $2`,
        SELECT 'trend_forecast' AS type,
               forecast_id      AS id,
               topic_name,
+              platform,
               NULL             AS article_count,
+              avg_bias_score,
+              trend_direction,
               NULL             AS window_start,
               NULL             AS window_end,
               created_at,
@@ -202,6 +219,45 @@ LIMIT $1 OFFSET $2`,
     });
 
     return result.rows as Prediction[];
+  }
+
+  /**
+   * Returns a paginated list of trending topics from the `trending_topics` view,
+   * ordered by most recently updated descending.
+   *
+   * Each row represents the latest aggregated state for a unique topic+platform pair,
+   * including volume, average bias score, risk level, and trend direction.
+   *
+   * @param page     - 1-based page number.
+   * @param pageSize - Number of records per page (capped at MAX_PAGE_SIZE).
+   */
+  async getTrendingTopics(page: number, pageSize: number): Promise<TrendingTopic[]> {
+    const safePageSize = Math.min(pageSize, MAX_PAGE_SIZE);
+    const offset = (page - 1) * safePageSize;
+
+    const result = await this.db.query(
+      `SELECT
+         topic_name,
+         platform,
+         volume,
+         avg_bias_score,
+         trend_direction,
+         risk_level,
+         updated_at
+       FROM trending_topics
+       ORDER BY updated_at DESC
+       LIMIT $1 OFFSET $2`,
+      [safePageSize, offset],
+    );
+
+    logger.info({
+      message: 'getTrendingTopics query completed',
+      page,
+      pageSize: safePageSize,
+      rowCount: result.rowCount,
+    });
+
+    return result.rows as TrendingTopic[];
   }
 
   /**

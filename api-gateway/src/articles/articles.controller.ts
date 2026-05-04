@@ -7,7 +7,7 @@ import {
   ParseIntPipe,
   DefaultValuePipe,
 } from '@nestjs/common';
-import { ArticlesService, Article, BiasRecord, Prediction } from './articles.service';
+import { ArticlesService, Article, BiasRecord, Prediction, TrendingTopic } from './articles.service';
 
 /**
  * REST controller exposing endpoints for articles, bias scores, and predictions.
@@ -87,5 +87,23 @@ export class ArticlesController {
     const clampedPageSize = Math.max(1, Math.min(pageSize, 100));
     const clampedPage = Math.max(1, page);
     return this.articlesService.getPredictions(clampedPage, clampedPageSize);
+  }
+
+  /**
+   * Returns a paginated list of trending topics (latest aggregated state per
+   * topic+platform pair) ordered by most recently updated descending.
+   *
+   * Query params:
+   *   page     — 1-based page number (default: 1)
+   *   pageSize — records per page (default: 20, max: 100)
+   */
+  @Get('trending-topics')
+  async getTrendingTopics(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('pageSize', new DefaultValuePipe(20), ParseIntPipe) pageSize: number,
+  ): Promise<TrendingTopic[]> {
+    const clampedPageSize = Math.max(1, Math.min(pageSize, 100));
+    const clampedPage = Math.max(1, page);
+    return this.articlesService.getTrendingTopics(clampedPage, clampedPageSize);
   }
 }

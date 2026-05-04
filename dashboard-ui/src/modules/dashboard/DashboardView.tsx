@@ -9,6 +9,7 @@ import ErrorBoundary from '@/components/common/ErrorBoundary';
 import { getSocket } from '@/lib/websocket';
 import { useDashboardStore } from '@/store/dashboardStore';
 import type { Article, BurstEvent, TrendForecast } from '@/modules/dashboard/types';
+import type { TrendingTopicRow } from '@/services/hydrationService';
 
 const VELOCITY_DATA = [
   { time: '00:00', value: 45 },
@@ -33,6 +34,7 @@ export default function DashboardView() {
   const mergeArticle = useDashboardStore((state) => state.mergeArticle);
   const mergeBurstEvent = useDashboardStore((state) => state.mergeBurstEvent);
   const mergeForecast = useDashboardStore((state) => state.mergeForecast);
+  const upsertTrendingTopic = useDashboardStore((state) => state.upsertTrendingTopic);
 
   useEffect(() => {
     const socket = getSocket();
@@ -44,6 +46,8 @@ export default function DashboardView() {
         mergeBurstEvent(msg as unknown as BurstEvent);
       } else if (msg.type === 'trend_forecast') {
         mergeForecast(msg as unknown as TrendForecast);
+      } else if (msg.type === 'trending_topic') {
+        upsertTrendingTopic(msg as unknown as TrendingTopicRow);
       }
     }
 
@@ -52,7 +56,7 @@ export default function DashboardView() {
     return () => {
       socket.off('message', handleMessage);
     };
-  }, [mergeArticle, mergeBurstEvent, mergeForecast]);
+  }, [mergeArticle, mergeBurstEvent, mergeForecast, upsertTrendingTopic]);
 
   return (
     <ErrorBoundary fallback={<p>Dashboard unavailable</p>}>

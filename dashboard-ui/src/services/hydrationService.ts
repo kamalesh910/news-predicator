@@ -38,6 +38,18 @@ export interface HydrationResult {
   articles: Article[];
   burstEvents: BurstEvent[];
   forecasts: TrendForecast[];
+  trendingTopics: TrendingTopicRow[];
+}
+
+/** Shape returned by GET /trending-topics */
+export interface TrendingTopicRow {
+  topic_name: string;
+  platform: string;
+  volume: number;
+  avg_bias_score: number | null;
+  trend_direction: string;
+  risk_level: 'critical' | 'elevated' | 'stable';
+  updated_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +151,10 @@ export async function hydrateAll(
     }
   }
 
-  const [articlesResult, predictionsResult] = await Promise.allSettled([
+  const [articlesResult, predictionsResult, trendingResult] = await Promise.allSettled([
     axiosGet<RawArticle>('/articles?pageSize=50'),
     axiosGet<RawPrediction>('/predictions?pageSize=50'),
+    axiosGet<TrendingTopicRow>('/trending-topics?pageSize=50'),
   ]);
 
   const rawArticles: RawArticle[] =
@@ -149,6 +162,9 @@ export async function hydrateAll(
 
   const rawPredictions: RawPrediction[] =
     predictionsResult.status === 'fulfilled' ? predictionsResult.value : [];
+
+  const trendingTopics: TrendingTopicRow[] =
+    trendingResult.status === 'fulfilled' ? trendingResult.value : [];
 
   const articles = rawArticles.map(mapArticle);
 
@@ -160,5 +176,5 @@ export async function hydrateAll(
     .filter((p) => p.type === 'trend_forecast')
     .map(mapTrendForecast);
 
-  return { articles, burstEvents, forecasts };
+  return { articles, burstEvents, forecasts, trendingTopics };
 }
