@@ -1,0 +1,21 @@
+/* Sentinel Risk Intelligence Dashboard — Design Tokens */
+
+:root {
+  /* Base backgrounds */
+  --color-bg-base: #11151F;
+  --color-surface: #1A2035;
+  --color-surface-2: #222B45;
+
+  /* Accent / brand */
+  --color-accent-primary: #2B7FFF;
+
+  /* Alert / danger */
+  --color-alert: #E78170;
+
+  /* Text */
+  --color-text-primary: #E8EAF0;
+  --color-text-secondary: #8B95A9;
+
+  /* Borders */
+  --color-border: #2A3350;
+}
